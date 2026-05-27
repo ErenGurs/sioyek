@@ -24,6 +24,8 @@
 #include <memory>
 #include <cctype>
 #include <cstdlib>
+#include <algorithm>
+#include <filesystem>
 #include <qpainterpath.h>
 #include <qabstractitemmodel.h>
 #include <qapplication.h>
@@ -44,6 +46,7 @@
 #include <qlistview.h>
 #include <qopenglfunctions.h>
 #include <qpushbutton.h>
+#include <qtabbar.h>
 #include <qsortfilterproxymodel.h>
 #include <qstringlistmodel.h>
 #include <qtextedit.h>
@@ -132,6 +135,7 @@ extern float HIGHLIGHT_COLORS[26 * 3];
 extern int STATUS_BAR_FONT_SIZE;
 extern Path default_config_path;
 extern Path default_keys_path;
+extern Path standard_data_path;
 extern std::vector<Path> user_config_paths;
 extern std::vector<Path> user_keys_paths;
 extern Path database_file_path;
@@ -296,6 +300,18 @@ MainWidget* get_window_with_window_id(int window_id) {
     }
     return nullptr;
 }
+
+class EqualTabBar : public QTabBar {
+protected:
+    QSize tabSizeHint(int index) const override {
+        QSize hint = QTabBar::tabSizeHint(index);
+        if (count() > 0) hint.setWidth(width() / count());
+        return hint;
+    }
+    QSize minimumTabSizeHint(int index) const override {
+        return tabSizeHint(index);
+    }
+};
 
 bool MainWidget::main_document_view_has_document()
 {
@@ -479,6 +495,8 @@ void MainWidget::resizeEvent(QResizeEvent* resize_event) {
 
     main_window_width = size().width();
     main_window_height = size().height();
+
+    update_tab_bar();
 
     if (scratchpad) {
         scratchpad->on_view_size_change(resize_event->size().width(), resize_event->size().height());
@@ -848,15 +866,17 @@ void MainWidget::update_text_selection(AbsoluteDocumentPos abs_mpos) {
 void MainWidget::persist(bool persist_drawings) {
     main_document_view->persist(persist_drawings);
 
-    // write the address of the current document in a file so that the next time
-    // we launch the application, we open this document
     if (main_document_view->get_document()) {
-        std::ofstream last_path_file(last_opened_file_address_path.get_path_utf8());
-
-        //std::string encoded_file_name_str = utf8_encode(main_document_view->get_document()->get_path());
-        std::string encoded_file_name_str = utf8_encode(get_current_tabs_file_names());
-        last_path_file << encoded_file_name_str.c_str() << std::endl;
-        last_path_file.close();
+        // Build content: current doc first, then remaining window tabs
+        std::wstring tabs_content = doc()->get_path();
+        for (auto& t : window_tabs_) {
+            if (t != doc()->get_path()) tabs_content += L"\n" + t;
+        }
+        std::wstring session_filename = L"session_" + std::to_wstring(session_index) + L".txt";
+        std::string session_path = standard_data_path.slash(session_filename).get_path_utf8();
+        std::ofstream f(session_path);
+        f << utf8_encode(tabs_content) << std::endl;
+        f.close();
     }
 }
 void MainWidget::closeEvent(QCloseEvent* close_event) {
@@ -1268,6 +1288,35 @@ MainWidget::MainWidget(fz_context* mupdf_context,
 
 
     scroll_bar = new QScrollBar(this);
+    tab_bar_ = new EqualTabBar();
+    tab_bar_->setExpanding(true);
+    tab_bar_->setTabsClosable(true);
+    tab_bar_->setDrawBase(false);
+    tab_bar_->setUsesScrollButtons(true);
+    tab_bar_->setMovable(true);
+
+    QObject::connect(tab_bar_, &QTabBar::tabBarClicked, [this](int index) {
+        if (index >= 0 && index < (int)window_tabs_.size()) {
+            handle_goto_tab(window_tabs_[index]);
+        }
+    });
+    QObject::connect(tab_bar_, &QTabBar::tabCloseRequested, [this](int index) {
+        if (index < 0 || index >= (int)window_tabs_.size()) return;
+        window_tabs_.erase(window_tabs_.begin() + index);
+        update_tab_bar();
+        if (!window_tabs_.empty()) {
+            int new_idx = std::min(index, (int)window_tabs_.size() - 1);
+            handle_goto_tab(window_tabs_[new_idx]);
+        }
+    });
+    QObject::connect(tab_bar_, &QTabBar::tabMoved, [this](int from, int to) {
+        if (from < 0 || from >= (int)window_tabs_.size()) return;
+        if (to < 0 || to >= (int)window_tabs_.size()) return;
+        auto path = window_tabs_[from];
+        window_tabs_.erase(window_tabs_.begin() + from);
+        window_tabs_.insert(window_tabs_.begin() + to, path);
+    });
+
     QVBoxLayout* layout = new QVBoxLayout;
     QHBoxLayout* hlayout = new QHBoxLayout;
 
@@ -1278,6 +1327,7 @@ MainWidget::MainWidget(fz_context* mupdf_context,
     layout->setSpacing(0);
     layout->setContentsMargins(0, 0, 0, 0);
     opengl_widget->setAttribute(Qt::WA_TransparentForMouseEvents);
+    layout->addWidget(tab_bar_);
     layout->addLayout(hlayout);
 
 #ifdef SIOYEK_ANDROID
@@ -2075,6 +2125,7 @@ void MainWidget::open_document(const std::wstring& path, std::optional<float> of
 
     if (doc()) {
         document_manager->add_tab(doc()->get_path());
+        add_to_window_tabs(doc()->get_path());
         //doc()->set_only_for_portal(false);
     }
 
@@ -2130,6 +2181,7 @@ void MainWidget::open_document(const std::wstring& path, std::optional<float> of
 
     deselect_document_indices();
     invalidate_render();
+    update_tab_bar();
 
 }
 
@@ -4512,6 +4564,7 @@ void MainWidget::open_document(const std::wstring& doc_path,
 
     if (doc()) {
         document_manager->add_tab(doc()->get_path());
+        add_to_window_tabs(doc()->get_path());
         //doc()->set_only_for_portal(false);
     }
 
@@ -4519,6 +4572,7 @@ void MainWidget::open_document(const std::wstring& doc_path,
     if (filename) {
         setWindowTitle(QString::fromStdWString(filename.value()));
     }
+    update_tab_bar();
 }
 
 // #ifndef Q_OS_MACOS
@@ -4820,6 +4874,14 @@ void MainWidget::handle_close_event() {
 #ifndef SIOYEK_ANDROID
     persist(true);
 #endif
+
+    // If this window was closed individually (not as part of an app quit),
+    // remove its session file so it is not restored on next launch.
+    if (!is_app_quitting) {
+        std::wstring session_filename = L"session_" + std::to_wstring(session_index) + L".txt";
+        std::string session_path = standard_data_path.slash(session_filename).get_path_utf8();
+        std::filesystem::remove(session_path);
+    }
 
     // we need to delete this here (instead of destructor) to ensure that application
     // closes immediately after the main window is closed
@@ -6414,6 +6476,7 @@ MainWidget* MainWidget::handle_new_window() {
     }
 
     windows.push_back(new_widget);
+    new_widget->session_index = (int)windows.size() - 1;
     return new_widget;
 }
 
@@ -10182,6 +10245,36 @@ std::wstring MainWidget::get_current_tabs_file_names() {
 void MainWidget::open_tabs(const std::vector<std::wstring>& tabs) {
     for (auto tab : tabs) {
         document_manager->add_tab(tab);
+    }
+}
+
+void MainWidget::add_to_window_tabs(const std::wstring& path) {
+    if (path.empty()) return;
+    auto it = std::find(window_tabs_.begin(), window_tabs_.end(), path);
+    if (it == window_tabs_.end()) {
+        window_tabs_.push_back(path);
+    }
+}
+void MainWidget::update_tab_bar() {
+    if (!tab_bar_) return;
+    QSignalBlocker blocker(tab_bar_);
+    while (tab_bar_->count() > 0) tab_bar_->removeTab(0);
+    for (auto& path : window_tabs_) {
+        QString name = QFileInfo(QString::fromStdWString(path)).fileName();
+        int idx = tab_bar_->addTab(name);
+        tab_bar_->setTabToolTip(idx, name);
+    }
+    if (doc()) {
+        auto it = std::find(window_tabs_.begin(), window_tabs_.end(), doc()->get_path());
+        if (it != window_tabs_.end()) {
+            int idx = (int)(it - window_tabs_.begin());
+            tab_bar_->setCurrentIndex(idx);
+        }
+    }
+    // Force equal tab widths based on available bar width
+    int count = tab_bar_->count();
+    if (count > 0) {
+        tab_bar_->update();
     }
 }
 

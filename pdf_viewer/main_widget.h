@@ -30,6 +30,7 @@ class QTimer;
 class QDragEvent;
 class QDropEvent;
 class QScrollBar;
+class QTabBar;
 class QTextToSpeech;
 class QStringListModel;
 class QLabel;
@@ -170,6 +171,12 @@ public:
     PdfViewOpenGLWidget* opengl_widget = nullptr;
     PdfViewOpenGLWidget* helper_opengl_widget_ = nullptr;
     QScrollBar* scroll_bar = nullptr;
+    QTabBar* tab_bar_ = nullptr;
+
+    // per-window list of open document paths (in order opened)
+    std::vector<std::wstring> window_tabs_;
+    int session_index = 0;
+    bool is_app_quitting = false;
 
     QJsonDocument commands_doc_json_document;
     QJsonDocument config_doc_json_document;
@@ -930,6 +937,8 @@ public:
     bool is_helper_visible();
     std::wstring get_current_tabs_file_names();
     void open_tabs(const std::vector<std::wstring>& tabs);
+    void add_to_window_tabs(const std::wstring& path);
+    void update_tab_bar();
     void handle_goto_tab(const std::wstring& path);
     void get_document_views_referencing_doc(std::wstring doc_path, std::vector<DocumentView*>& document_views, std::vector<MainWidget*>& corresponding_widgets, std::vector<bool>& is_helper);
     void restore_document_view_states(const std::vector<DocumentView*>& document_views, const std::vector<DocumentViewState>& states);

@@ -389,6 +389,39 @@ void add_paths_to_file_system_watcher(QFileSystemWatcher& watcher, const Path& d
 }
 
 
+void restore_sessions(MainWidget* main_widget) {
+    // Read per-window session files (session_0.txt, session_1.txt, ...)
+    // and restore each window with its previously open tabs.
+    for (int i = 0; ; i++) {
+        Path session_path = standard_data_path.slash(
+            L"session_" + std::to_wstring(i) + L".txt");
+        std::ifstream f(session_path.get_path_utf8());
+        if (!f.is_open()) break;
+
+        std::vector<std::wstring> tabs;
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.empty()) continue;
+            std::wstring wpath = utf8_decode(line);
+            if (QFile::exists(QString::fromStdWString(wpath))) {
+                tabs.push_back(wpath);
+            }
+        }
+        f.close();
+        if (tabs.empty()) continue;
+
+        MainWidget* w = (i == 0) ? main_widget : new MainWidget(windows[0]);
+        w->session_index = i;
+        for (auto& t : tabs) w->add_to_window_tabs(t);
+        w->open_document(tabs[0]);
+        if (i > 0) {
+            w->apply_window_params_for_one_window_mode(true);
+            w->show();
+            windows.push_back(w);
+        }
+    }
+}
+
 MainWidget* get_window_with_opened_file_path(const std::wstring& file_path) {
     if (!QFile::exists(QString::fromStdWString(file_path))) {
         return nullptr;
@@ -898,6 +931,29 @@ int main(int argc, char* args[]) {
     }
 
     main_widget->show();
+    main_widget->session_index = 0;
+
+    // QEvent::Quit is posted BEFORE windows receive close events on macOS Cmd+Q.
+    // We catch it here to set is_app_quitting before handle_close_event runs,
+    // so session files are preserved instead of deleted.
+    class QuitFilter : public QObject {
+    public:
+        bool eventFilter(QObject*, QEvent* event) override {
+            if (event->type() == QEvent::Quit) {
+                for (auto w : windows) w->is_app_quitting = true;
+            }
+            return false;
+        }
+    };
+    app.installEventFilter(new QuitFilter());
+
+    // Restore per-window sessions from previous run (session_0.txt, session_1.txt, ...)
+    // Only if no explicit file was passed on the command line
+    bool has_explicit_file = app.arguments().size() > 1 &&
+        !app.arguments().at(1).startsWith("-");
+    if (!has_explicit_file) {
+        restore_sessions(main_widget);
+    }
 
     handle_args(app.arguments());
     main_widget->execute_macro_if_enabled(STARTUP_COMMANDS);
