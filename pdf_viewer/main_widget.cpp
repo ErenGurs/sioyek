@@ -25,6 +25,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <algorithm>
+#include <unordered_map>
 #include <filesystem>
 #include <qpainterpath.h>
 #include <qabstractitemmodel.h>
@@ -2089,11 +2090,15 @@ void MainWidget::open_document_with_hash(const std::string& path, std::optional<
 
 void MainWidget::adjust_two_page_mode_document_zoom_and_offset(std::wstring doc_path){
     if (main_document_view->is_two_page_mode()){
-        for (int i = history.size() - 1; i >= 0; i--){
-            if (history[i].document_path == doc_path){
-                main_document_view->set_offset_x(history[i].book_state.offset_x);
-                main_document_view->set_zoom_level(history[i].book_state.zoom_level, true);
-                return;
+        auto it = doc_histories.find(doc_path);
+        if (it != doc_histories.end()) {
+            const DocHistory& h = it->second;
+            for (int i = (int)h.entries.size() - 1; i >= 0; i--){
+                if (h.entries[i].document_path == doc_path){
+                    main_document_view->set_offset_x(h.entries[i].book_state.offset_x);
+                    main_document_view->set_zoom_level(h.entries[i].book_state.zoom_level, true);
+                    return;
+                }
             }
         }
     }
@@ -2805,58 +2810,48 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
 }
 
 
+MainWidget::DocHistory& MainWidget::cur_doc_history() {
+    std::wstring path = doc() ? doc()->get_path() : L"";
+    return doc_histories[path];
+}
+
 void MainWidget::push_state(bool update) {
 
-    if (!main_document_view_has_document()) return; // we don't add empty document to history
+    if (!main_document_view_has_document()) return;
 
+    DocHistory& h = cur_doc_history();
     DocumentViewState dvs = main_document_view->get_state();
 
-    //if (history.size() > 0) { // this check should always be true
-    //	history[history.size() - 1] = dvs;
-    //}
-    //// don't add the same place in history multiple times
-    //// todo: we probably don't need this check anymore
-    //if (history.size() > 0) {
-    //	DocumentViewState last_history = history.back();
-    //	if (last_history == dvs) return;
-    //}
-
-    // delete all history elements after the current history point
-    history.erase(history.begin() + (1 + current_history_index), history.end());
-    if (!((history.size() > 0) && (history.back() == dvs))) {
-        history.push_back(dvs);
+    // delete all entries after current index (forward history)
+    h.entries.erase(h.entries.begin() + (1 + h.index), h.entries.end());
+    if (!((h.entries.size() > 0) && (h.entries.back() == dvs))) {
+        h.entries.push_back(dvs);
     }
     if (update) {
-        current_history_index = static_cast<int>(history.size() - 1);
+        h.index = static_cast<int>(h.entries.size() - 1);
     }
 }
 
 void MainWidget::next_state() {
-    //update_current_history_index();
-    if (current_history_index < (static_cast<int>(history.size()) - 1)) {
+    if (!main_document_view_has_document()) return;
+    DocHistory& h = cur_doc_history();
+    if (h.index < (static_cast<int>(h.entries.size()) - 1)) {
         update_current_history_index();
-        current_history_index++;
-        if (current_history_index + 1 < history.size()) {
-            set_main_document_view_state(history[current_history_index + 1]);
+        h.index++;
+        if (h.index + 1 < (int)h.entries.size()) {
+            set_main_document_view_state(h.entries[h.index + 1]);
         }
-
     }
 }
 
 void MainWidget::prev_state() {
-    if (current_history_index >= 0) {
+    if (!main_document_view_has_document()) return;
+    DocHistory& h = cur_doc_history();
+    if (h.index >= 0) {
         update_current_history_index();
 
-        /*
-        Goto previous history
-        In order to edit a link, we set the link to edit and jump to the link location, when going back, we
-        update the link with the current location of document, therefore, we must check to see if a link
-        is being edited and if so, we should update its destination position
-        */
         if (portal_to_edit) {
-
-            //std::wstring link_document_path = checksummer->get_path(link_to_edit.value().dst.document_checksum).value();
-            std::wstring link_document_path = history[current_history_index].document_path;
+            std::wstring link_document_path = h.entries[h.index].document_path;
             Document* link_owner = document_manager->get_document(link_document_path);
 
             OpenedBookState state = main_document_view->get_state().book_state;
@@ -2870,32 +2865,29 @@ void MainWidget::prev_state() {
             portal_to_edit = {};
         }
 
-        if (current_history_index == (history.size() - 1)) {
-            if (!(history[history.size() - 1] == main_document_view->get_state())) {
+        if (h.index == (int)(h.entries.size() - 1)) {
+            if (!(h.entries[h.entries.size() - 1] == main_document_view->get_state())) {
                 push_state(false);
             }
         }
-        if (history[current_history_index] == main_document_view->get_state()) {
-            current_history_index--;
+        if (h.entries[h.index] == main_document_view->get_state()) {
+            h.index--;
         }
-        if (current_history_index >= 0) {
-            DocumentViewState new_state = history[current_history_index];
-            // save the current document in the list of opened documents
-            if (doc() && doc()->get_path() != new_state.document_path) {
-                persist();
-            }
+        if (h.index >= 0) {
+            DocumentViewState new_state = h.entries[h.index];
             set_main_document_view_state(new_state);
-            current_history_index--;
+            h.index--;
         }
     }
 }
 
 void MainWidget::update_current_history_index() {
     if (main_document_view_has_document()) {
-        int index_to_update = current_history_index + 1;
-        if (index_to_update < history.size()) {
+        DocHistory& h = cur_doc_history();
+        int index_to_update = h.index + 1;
+        if (index_to_update < (int)h.entries.size()) {
             DocumentViewState current_state = main_document_view->get_state();
-            history[index_to_update] = current_state;
+            h.entries[index_to_update] = current_state;
         }
     }
 }
@@ -10291,7 +10283,6 @@ void MainWidget::handle_goto_tab(const std::wstring& path) {
         }
     }
 
-    push_state();
     open_document(path);
 }
 
@@ -10374,11 +10365,14 @@ void MainWidget::document_views_open_path(const std::vector<DocumentView*>& docu
 }
 
 void MainWidget::update_renamed_document_in_history(std::wstring old_path, std::wstring new_path){
-
-    for (int i = 0; i < history.size(); i++) {
-        if (history[i].document_path == old_path) {
-            history[i].document_path = new_path;
+    auto it = doc_histories.find(old_path);
+    if (it != doc_histories.end()) {
+        DocHistory h = std::move(it->second);
+        doc_histories.erase(it);
+        for (auto& entry : h.entries) {
+            entry.document_path = new_path;
         }
+        doc_histories[new_path] = std::move(h);
     }
 }
 

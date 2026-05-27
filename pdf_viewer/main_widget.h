@@ -204,11 +204,13 @@ public:
     // method is historical. I am too lazy to change it.
     std::function<void(std::string, std::string)> on_command_done = nullptr;
 
-    // List of previous locations in the current session. Note that we keep the history even across files
-    // hence why `DocumentViewState` has a `document_path` member
-    std::vector<DocumentViewState> history;
-    // the index in the `history` array that we will jump to when `prev_state` is called.
-    int current_history_index = -1;
+    // Per-document navigation history. Each open PDF has its own independent
+    // back/forward stack so that tab switching does not destroy history.
+    struct DocHistory {
+        std::vector<DocumentViewState> entries;
+        int index = -1;
+    };
+    std::unordered_map<std::wstring, DocHistory> doc_histories;
 
     // custom message to be displayed in sioyek's statusbar
     std::wstring custom_status_message = L"";
@@ -446,6 +448,7 @@ public:
     void next_state();
     void prev_state();
     void update_current_history_index();
+    DocHistory& cur_doc_history();
 
     void set_main_document_view_state(DocumentViewState new_view_state);
     void handle_click(WindowPos pos);
